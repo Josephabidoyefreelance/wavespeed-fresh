@@ -49,24 +49,24 @@ async function getRow(recordId) {
 
 // ---------- WaveSpeed / Fal.ai ----------
 
-// ✅ FIX: This function is now "clean". It only submits the job and returns the ID
-// or throws an error. It no longer touches Airtable, which fixes the race condition.
+// ✅ FIX 1: Change the hardcoded model name in the payload
 async function submitWaveSpeedJob({ prompt, subjectDataUrl, referenceDataUrls, width, height, runId, recordId }) {
+  const modelName = "seedream-v4-edit-sequential"; // Use the simplified name for the API call
   const payload = {
     prompt,
-    model: "bytedance/seedream-v4-edit-sequential",
+    model: modelName,
     width: Number(width) || 1024,
     height: Number(height) || 1024,
     images: [subjectDataUrl, ...referenceDataUrls],
   };
 
   const webhook = `${PUBLIC_BASE_URL.replace(/\/+$/, "")}/webhooks/wavespeed?record_id=${encodeURIComponent(recordId)}&run_id=${encodeURIComponent(runId)}`;
-  const url = "https://api.wavespeed.ai/api/v3/bytedance/seedream-v4-edit-sequential";
+  // ✅ FIX 2: Change the URL endpoint to use the simplified model name
+  const url = `https://api.wavespeed.ai/api/v3/${modelName}`;
 
   const res = await fetch(`${url}?webhook=${encodeURIComponent(webhook)}`, {
     method: "POST",
     headers: {
-      // This part was already correct in your code!
       Authorization: `Bearer ${WAVESPEED_API_KEY}`,
       "Content-Type": "application/json",
     },
@@ -74,26 +74,33 @@ async function submitWaveSpeedJob({ prompt, subjectDataUrl, referenceDataUrls, w
   });
 
   const txt = await res.text();
-  const data = JSON.parse(txt);
+  try {
+    const data = JSON.parse(txt);
 
-  if (!res.ok) {
-    console.error(`❌ WaveSpeed submit error: ${txt}`);
-    throw new Error(`WaveSpeed API Error: ${data.message || txt}`);
-  }
-  
-  const requestId = data.id || data.request_id || data.task_id || null;
-  if (!requestId) {
-    console.error("❌ WaveSpeed submit: no id in response, body was:", txt);
-    throw new Error("WaveSpeed submit: no id in response");
-  }
+    if (!res.ok) {
+      console.error(`❌ WaveSpeed submit error: ${txt}`);
+      // Include the actual status code for better debugging if needed
+      throw new Error(`WaveSpeed API Error: ${res.status} - ${data.message || txt}`);
+    }
+    
+    const requestId = data.id || data.request_id || data.task_id || null;
+    if (!requestId) {
+      console.error("❌ WaveSpeed submit: no id in response, body was:", txt);
+      throw new Error("WaveSpeed submit: no id in response");
+    }
 
-  console.log(`🚀 WaveSpeed job submitted: ${requestId}`);
-  return requestId; // Return only the ID
+    console.log(`🚀 WaveSpeed job submitted: ${requestId}`);
+    return requestId; // Return only the ID
+  } catch (err) {
+    // If JSON parsing fails (e.g., non-JSON error response)
+    console.error(`❌ WaveSpeed submit error (Pre-ID check): ${err.message}. Response: ${txt}`);
+    throw new Error(`WaveSpeed API Error: Could not parse response. ${txt.slice(0, 100)}`);
+  }
 }
 
 
 // ---------- UI (NO CHANGES MADE) ----------
-// As requested, this section is 100% identical to your original.
+// The UI part remains the same.
 app.get("/app", (_req, res) => {
   res.type("html").send(`<!doctype html>
 <html>
@@ -183,7 +190,7 @@ app.post("/api/start-batch", async (req, res) => {
       "Prompt": prompt,
       "Subject": [{ url: subjectUrl }],
       "References": refs.map(u => ({ url: u })),
-      "Model": "Seedream v4",
+      "Model": "Seedream v4", // Display name for Airtable
       "Size": `${width}x${height}`,
       "Status": "pending", // Start as pending
       "Run ID": runId,
