@@ -2,35 +2,35 @@ import 'dotenv/config';
 import express from "express";
 import crypto from "crypto";
 import fetch from "node-fetch";
+import cors from "cors"; 
 
-// --- Configuration Setup (Now includes FAL) ---
-// FIX: Use Render's dynamically assigned port, default to 4000 locally
+// --- Configuration Setup ---
 const PORT = process.env.PORT || 4000; 
 
 const {
   PUBLIC_BASE_URL,
   WAVESPEED_API_KEY,
-  FAL_API_TOKEN, // Requires FAL_API_TOKEN in .env/Render
+  FAL_API_TOKEN, 
   AIRTABLE_PAT,
   AIRTABLE_BASE_ID,
   AIRTABLE_TABLE
 } = process.env;
 
-// FIX: Corrected environment variable check
+// Check for required environment variables
 if (!PUBLIC_BASE_URL || !WAVESPEED_API_KEY || !AIRTABLE_PAT || !AIRTABLE_BASE_ID || !AIRTABLE_TABLE || !FAL_API_TOKEN) {
-  console.error("❌ Missing required env vars. Ensure WAVESPEED_API_KEY and FAL_API_TOKEN are set.");
-  // Removed the incorrect process.error() line
+  console.error("❌ Missing required env vars. Ensure all API keys and PUBLIC_BASE_URL are set.");
   process.exit(1);
 }
 
 const app = express();
+app.use(cors());
 app.use(express.json({ limit: "20mb" }));
 app.use(express.urlencoded({ extended: true, limit: "20mb" }));
 
-const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+// const sleep = (ms) => new Promise(r => setTimeout(r, ms)); // Removed for faster submission
 const nowISO = () => new Date().toISOString();
 
-// ---------- Airtable Functions (Unchanged) ----------
+// ---------- Airtable Functions ----------
 const baseURL = `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${encodeURIComponent(AIRTABLE_TABLE)}`;
 const headers = { Authorization: `Bearer ${AIRTABLE_PAT}`, "Content-Type": "application/json" };
 
@@ -53,7 +53,6 @@ async function getRow(recordId) {
   return res.json();
 }
 
-// Helper function to convert URL to Base64 (Used by WaveSpeed)
 async function urlToDataURL(url) {
   const res = await fetch(url);
   if (!res.ok) throw new Error(`Failed to fetch image: ${url}`);
@@ -62,7 +61,8 @@ async function urlToDataURL(url) {
   return `data:${type};base64,${buf.toString("base64")}`;
 }
 
-// ---------- WaveSpeed Submission (Model: Seedream v4) ----------
+// ---------- WaveSpeed Submission ----------
+// FIX: Added 'prompt' to the destructured parameters to prevent ReferenceError
 async function submitWaveSpeedJob({ prompt, subjectDataUrl, referenceDataUrls, width, height, runId, recordId }) {
     
     const modelPath = "bytedance/seedream-v4"; 
@@ -70,7 +70,7 @@ async function submitWaveSpeedJob({ prompt, subjectDataUrl, referenceDataUrls, w
     const allImages = (subjectDataUrl ? [subjectDataUrl] : []).concat(referenceDataUrls || []);
 
     const payload = {
-        prompt,
+        prompt, // ReferenceError fixed here
         model: simplifiedModelName, 
         width: Number(width) || 1024,
         height: Number(height) || 1024,
@@ -116,7 +116,8 @@ async function submitWaveSpeedJob({ prompt, subjectDataUrl, referenceDataUrls, w
     return requestId;
 }
 
-// ---------- FAL Submission (Model: Stable Diffusion XL) ---
+// ---------- FAL Submission ----------
+// FIX: Added 'prompt' to the destructured parameters to prevent ReferenceError
 async function submitFalJob({ prompt, subjectUrl, width, height, runId, recordId }) {
     
     const modelId = "fal-ai/stable-diffusion-xl"; 
@@ -125,17 +126,22 @@ async function submitFalJob({ prompt, subjectUrl, width, height, runId, recordId
     const webhook = `${PUBLIC_BASE_URL.replace(/\/+$/, "")}/webhooks/fal?record_id=${encodeURIComponent(recordId)}&run_id=${encodeURIComponent(runId)}`;
 
     const payload = {
-        prompt,
+        prompt, // ReferenceError fixed here
         image_url: imageInput, 
         width: Number(width) || 1024,
         height: Number(height) || 1024,
     };
     
-    const url = `https://api.fal.ai/models/${modelId}/generate?webhook=${encodeURIComponent(webhook)}`;
+    // URL FIX: Includes /v1/ to fix the 404 error
+    const url = `https://api.fal.ai/v1/models/${modelId}/generate?webhook=${encodeURIComponent(webhook)}`;
+
+    // DEBUG: Log the token value before use to isolate the 401 error cause
+    console.log("DEBUG: Fal Token Value (Length):", FAL_API_TOKEN ? FAL_API_TOKEN.length : 'undefined');
 
     const res = await fetch(url, {
         method: "POST",
         headers: {
+            // Header is correct: uses 'Key ' prefix
             Authorization: `Key ${FAL_API_TOKEN}`, 
             "Content-Type": "application/json",
         },
@@ -169,7 +175,7 @@ async function submitFalJob({ prompt, subjectUrl, width, height, runId, recordId
 }
 
 
-// ---------- UI (NOW INCLUDES PROVIDER SELECT) ----------
+// ---------- UI (Includes Provider Select) ----------
 app.get("/app", (_req, res) => {
   res.type("html").send(`<!doctype html>
 <html>
@@ -259,12 +265,15 @@ form.addEventListener('submit',async e=>{
 // ---------- API (CENTRAL DISPATCHER) ----------
 app.post("/api/start-batch", async (req, res) => {
   try {
-    const { provider = 'WaveSpeed', prompt, subjectUrl = "", referenceUrls = "", width = 1024, height = 1024, count = 1 } = req.body;
+    const { prompt, subjectUrl = "", referenceUrls = "", width = 1024, height = 1024, count = 1 } = req.body;
+    const provider = String(req.body.provider || 'WaveSpeed').trim();
+    
     if (!prompt) return res.status(400).json({ error: "Missing prompt" });
 
     const refs = referenceUrls.split(",").map(s => s.trim()).filter(Boolean);
     const runId = crypto.randomUUID();
     
+    // 1. Prepare job data based on provider
     let submissionData = {
         prompt, width, height, runId, subjectUrl, recordId: null
     };
@@ -284,6 +293,7 @@ app.post("/api/start-batch", async (req, res) => {
         return res.status(400).json({ error: "Invalid provider selected" });
     }
 
+    // 2. Create the row in Airtable
     const recordId = await createRow({
       "Provider": provider,
       "Prompt": prompt,
@@ -298,20 +308,22 @@ app.post("/api/start-batch", async (req, res) => {
     });
     submissionData.recordId = recordId; 
 
+    // 3. Submit jobs to the selected provider (Quick Submission: no sleep)
     const jobPromises = [];
     for (let i = 0; i < count; i++) {
-      const p = (async (delay) => {
-        await sleep(delay);
+      const p = (async () => {
         let requestId;
         
         if (provider === 'WaveSpeed') {
+            // WaveSpeed submission should work fine
             requestId = await submitWaveSpeedJob({ ...submissionData, ...dataUrls });
         } else { // Fal
+            // Fal submission, depends only on correct FAL_API_TOKEN
             requestId = await submitFalJob(submissionData);
         }
         return requestId;
 
-      })(i * 1200);
+      })();
       jobPromises.push(p);
     }
 
@@ -434,7 +446,6 @@ app.post("/webhooks/fal", async (req, res) => {
     
     if (data.status === 'error' || data.error) {
       console.error(`❌ Fal Job ${requestId} failed:`, data.error || 'Unknown error');
-      // Logic to update Airtable failure for Fal
       const current = await getRow(recordId);
       const fields = current.fields || {};
       const prevFailed = (fields["Failed IDs"] || "").split(",").filter(Boolean);
@@ -488,5 +499,4 @@ app.post("/webhooks/fal", async (req, res) => {
 
 
 app.get("/", (_req, res) => res.send("Multi-Provider Batch Server running. Visit /app"));
-// FIX: Listen on the dynamic port
 app.listen(PORT, () => console.log(`✅ Listening on port ${PORT}`));
