@@ -3,8 +3,11 @@ import express from "express";
 import crypto from "crypto";
 import fetch from "node-fetch";
 
+// --- FIX: Use Render's dynamically assigned port, default to 4000 locally ---
+const PORT = process.env.PORT || 4000;
+// ---------------------------------------------------------------------------
+
 const {
-  PORT = 4000,
   PUBLIC_BASE_URL,
   WAVESPEED_API_KEY,
   AIRTABLE_PAT,
@@ -298,11 +301,8 @@ app.post("/webhooks/wavespeed", async (req, res) => {
     }
 
     // FIX IS HERE: Correctly handle 'outputs' array of strings
-    
-    // 1. Prioritize data.outputs (the array of URL strings)
     const outputsArray = Array.isArray(data.outputs) ? data.outputs : [];
     
-    // 2. Extract URL strings directly, or fall back to single image fields
     const imageUrls = outputsArray.filter(s => typeof s === 'string' && s.startsWith('http'))
                       .concat(data.output?.url || data.image || [])
                       .filter(Boolean);
@@ -310,7 +310,6 @@ app.post("/webhooks/wavespeed", async (req, res) => {
     const outputUrl = imageUrls[0] || null;
 
     if (!outputUrl) {
-      // The status is 'completed' but we couldn't find a URL. Log and return OK.
       console.warn(`Webhook for ${requestId} had no output URL.`);
       return res.json({ ok: true, error: "No output URL found in data.outputs" }); 
     }
@@ -357,4 +356,6 @@ app.post("/webhooks/wavespeed", async (req, res) => {
 });
 
 app.get("/", (_req, res) => res.send("WaveSpeed Batch Server running. Visit /app"));
-app.listen(PORT, () => console.log(`✅ Listening on http://localhost:${PORT}`));
+// --- FIX: Listen on Render's dynamic port ---
+app.listen(PORT, () => console.log(`✅ Listening on port ${PORT}`));
+// ------------------------------------------
