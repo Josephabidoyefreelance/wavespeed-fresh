@@ -3,22 +3,23 @@ import express from "express";
 import crypto from "crypto";
 import fetch from "node-fetch";
 
-// --- FIX: Use Render's dynamically assigned port, default to 4000 locally ---
-const PORT = process.env.PORT || 4000;
-// ---------------------------------------------------------------------------
+// --- Configuration Setup (Now includes FAL) ---
+// FIX: Use Render's dynamically assigned port, default to 4000 locally
+const PORT = process.env.PORT || 4000; 
 
 const {
   PUBLIC_BASE_URL,
   WAVESPEED_API_KEY,
+  FAL_API_TOKEN, // Requires FAL_API_TOKEN in .env/Render
   AIRTABLE_PAT,
   AIRTABLE_BASE_ID,
   AIRTABLE_TABLE
 } = process.env;
 
-// Check for required environment variables (crucial for both local and Render)
-if (!PUBLIC_BASE_URL || !WAVESPEED_API_KEY || !AIRTABLE_PAT || !AIRTABLE_BASE_ID || !AIRTABLE_TABLE) {
-  console.error("❌ Missing required env vars. Check your .env file or Render settings.");
-  process.error("Missing required environment variables.");
+// FIX: Corrected environment variable check
+if (!PUBLIC_BASE_URL || !WAVESPEED_API_KEY || !AIRTABLE_PAT || !AIRTABLE_BASE_ID || !AIRTABLE_TABLE || !FAL_API_TOKEN) {
+  console.error("❌ Missing required env vars. Ensure WAVESPEED_API_KEY and FAL_API_TOKEN are set.");
+  // Removed the incorrect process.error() line
   process.exit(1);
 }
 
@@ -29,7 +30,7 @@ app.use(express.urlencoded({ extended: true, limit: "20mb" }));
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const nowISO = () => new Date().toISOString();
 
-// ---------- Airtable Functions ----------
+// ---------- Airtable Functions (Unchanged) ----------
 const baseURL = `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${encodeURIComponent(AIRTABLE_TABLE)}`;
 const headers = { Authorization: `Bearer ${AIRTABLE_PAT}`, "Content-Type": "application/json" };
 
@@ -52,7 +53,7 @@ async function getRow(recordId) {
   return res.json();
 }
 
-// Helper function to convert URL to Base64
+// Helper function to convert URL to Base64 (Used by WaveSpeed)
 async function urlToDataURL(url) {
   const res = await fetch(url);
   if (!res.ok) throw new Error(`Failed to fetch image: ${url}`);
@@ -61,16 +62,11 @@ async function urlToDataURL(url) {
   return `data:${type};base64,${buf.toString("base64")}`;
 }
 
-// ---------- WaveSpeed Job Submission (WORKING MODEL) ----------
+// ---------- WaveSpeed Submission (Model: Seedream v4) ----------
 async function submitWaveSpeedJob({ prompt, subjectDataUrl, referenceDataUrls, width, height, runId, recordId }) {
     
-    // MODEL PATH: Standard Seedream V4 (T2I) - This model is licensed for your key.
     const modelPath = "bytedance/seedream-v4"; 
-    
-    // PAYLOAD ID: The corresponding ID
     const simplifiedModelName = "bytedance/seedream-v4"; 
-
-    // Combine subject and references into a single array for the API
     const allImages = (subjectDataUrl ? [subjectDataUrl] : []).concat(referenceDataUrls || []);
 
     const payload = {
@@ -78,11 +74,10 @@ async function submitWaveSpeedJob({ prompt, subjectDataUrl, referenceDataUrls, w
         model: simplifiedModelName, 
         width: Number(width) || 1024,
         height: Number(height) || 1024,
-        images: allImages, // Images are included now
+        images: allImages, 
     };
 
     const webhook = `${PUBLIC_BASE_URL.replace(/\/+$/, "")}/webhooks/wavespeed?record_id=${encodeURIComponent(recordId)}&run_id=${encodeURIComponent(runId)}`;
-    
     const url = `https://api.wavespeed.ai/api/v3/${modelPath}`; 
 
     const res = await fetch(`${url}?webhook=${encodeURIComponent(webhook)}`, {
@@ -108,10 +103,8 @@ async function submitWaveSpeedJob({ prompt, subjectDataUrl, referenceDataUrls, w
         throw new Error(errorMessage);
     }
     
-    // ID PARSING FIX: Access the inner 'data' object
     const responseData = JSON.parse(txt);
     const jobData = responseData.data || {}; 
-    
     const requestId = jobData.id || jobData.request_id || jobData.task_id || null; 
     
     if (!requestId) {
@@ -123,14 +116,67 @@ async function submitWaveSpeedJob({ prompt, subjectDataUrl, referenceDataUrls, w
     return requestId;
 }
 
-// ---------- UI (IMAGE INPUTS RESTORED) ----------
+// ---------- FAL Submission (Model: Stable Diffusion XL) ---
+async function submitFalJob({ prompt, subjectUrl, width, height, runId, recordId }) {
+    
+    const modelId = "fal-ai/stable-diffusion-xl"; 
+    const imageInput = subjectUrl || null; 
+
+    const webhook = `${PUBLIC_BASE_URL.replace(/\/+$/, "")}/webhooks/fal?record_id=${encodeURIComponent(recordId)}&run_id=${encodeURIComponent(runId)}`;
+
+    const payload = {
+        prompt,
+        image_url: imageInput, 
+        width: Number(width) || 1024,
+        height: Number(height) || 1024,
+    };
+    
+    const url = `https://api.fal.ai/models/${modelId}/generate?webhook=${encodeURIComponent(webhook)}`;
+
+    const res = await fetch(url, {
+        method: "POST",
+        headers: {
+            Authorization: `Key ${FAL_API_TOKEN}`, 
+            "Content-Type": "application/json",
+        },
+        body: JSON.stringify(payload),
+    });
+
+    const txt = await res.text();
+    
+    if (!res.ok) {
+        console.error(`❌ Fal submit error (Status ${res.status}): ${txt}`);
+        let errorMessage = `Fal API Error (${res.status}): `;
+        try {
+            const data = JSON.parse(txt);
+            errorMessage += data.detail || data.error || txt;
+        } catch {
+            errorMessage += txt;
+        }
+        throw new Error(errorMessage);
+    }
+    
+    const responseData = JSON.parse(txt);
+    const requestId = responseData.request_id || responseData.id || null; 
+    
+    if (!requestId) {
+        console.error("❌ Fal submit: no id in response, body was:", txt);
+        throw new Error("Fal submit: no id in response");
+    }
+
+    console.log(`🚀 Fal job submitted: ${requestId}`);
+    return requestId;
+}
+
+
+// ---------- UI (NOW INCLUDES PROVIDER SELECT) ----------
 app.get("/app", (_req, res) => {
   res.type("html").send(`<!doctype html>
 <html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>WaveSpeed Dashboard</title>
+<title>AI Provider Dashboard</title>
 <style>
 body{
   margin:0;padding:40px;
@@ -149,13 +195,18 @@ form{
 }
 form:hover{transform:translateY(-3px);}
 label{display:block;margin-top:14px;font-weight:600;color:#80deea;}
-input,textarea{
+input,textarea,select{
   width:100%;padding:10px;margin-top:6px;
   border:none;border-radius:8px;
   background:rgba(255,255,255,0.1);
   color:#fff;font-size:14px;transition:.3s;
+  appearance: none; 
+  background-image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"><path fill="rgba(255,255,255,0.7)" d="M7 10l5 5 5-5z"/></svg>');
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  padding-right: 30px;
 }
-input:focus,textarea:focus{background:rgba(255,255,255,0.2);outline:none;}
+input:focus,textarea:focus,select:focus{background:rgba(255,255,255,0.2);outline:none;}
 button{
   margin-top:20px;padding:14px;width:100%;
   border:none;border-radius:12px;
@@ -168,13 +219,19 @@ button:hover{background:#0097a7;box-shadow:0 0 12px rgba(0,188,212,.5);}
 </style>
 </head>
 <body>
-<h1>⚡ WaveSpeed Seedream v4 — Image-Conditioned Runner</h1>
+<h1>⚡ Multi-Provider Runner (WaveSpeed/Fal)</h1>
 <form id="batchForm">
+  <label>Provider</label>
+  <select name="provider">
+    <option value="WaveSpeed">WaveSpeed (Seedream v4)</option>
+    <option value="Fal">Fal (Stable Diffusion XL)</option>
+  </select>
+
   <label>Prompt</label>
   <textarea name="prompt" rows="3" required placeholder="Describe your dream image..."></textarea>
   <label>Subject image URL (Optional)</label>
   <input name="subjectUrl" type="url" placeholder="https://example.com/subject.png">
-  <label>Reference image URLs (comma-separated, Optional)</label>
+  <label>Reference image URLs (comma-separated, Optional - Used by WaveSpeed only)</label>
   <input name="referenceUrls" type="text" placeholder="https://ref1.png, https://ref2.png">
   <div style="display:flex;gap:10px;margin-top:10px;">
     <div style="flex:1"><label>Width</label><input name="width" type="number" value="1024"></div>
@@ -199,50 +256,61 @@ form.addEventListener('submit',async e=>{
 </body></html>`);
 });
 
-// ---------- API (IMAGE DATA HANDLING RESTORED) ----------
+// ---------- API (CENTRAL DISPATCHER) ----------
 app.post("/api/start-batch", async (req, res) => {
   try {
-    const { prompt, subjectUrl = "", referenceUrls = "", width = 1024, height = 1024, count = 1 } = req.body;
+    const { provider = 'WaveSpeed', prompt, subjectUrl = "", referenceUrls = "", width = 1024, height = 1024, count = 1 } = req.body;
     if (!prompt) return res.status(400).json({ error: "Missing prompt" });
 
     const refs = referenceUrls.split(",").map(s => s.trim()).filter(Boolean);
     const runId = crypto.randomUUID();
+    
+    let submissionData = {
+        prompt, width, height, runId, subjectUrl, recordId: null
+    };
 
-    // Create the row with a "pending" status first
+    let modelName = "";
+    let dataUrls = null; 
+    
+    if (provider === 'WaveSpeed') {
+        dataUrls = {
+            subjectDataUrl: subjectUrl ? await urlToDataURL(subjectUrl) : null,
+            referenceDataUrls: await Promise.all(refs.map(urlToDataURL)),
+        };
+        modelName = "WaveSpeed (Seedream v4)";
+    } else if (provider === 'Fal') {
+        modelName = "Fal (Stable Diffusion XL)";
+    } else {
+        return res.status(400).json({ error: "Invalid provider selected" });
+    }
+
     const recordId = await createRow({
+      "Provider": provider,
       "Prompt": prompt,
       "Subject": subjectUrl ? [{ url: subjectUrl }] : [],
       "References": refs.map(u => ({ url: u })),
-      "Model": "Seedream v4 (T2I + Image Condition)", // Display name for Airtable
+      "Model": modelName, 
       "Size": `${width}x${height}`,
-      "Status": "pending", // Start as pending
+      "Status": "pending", 
       "Run ID": runId,
       "Created At": nowISO(),
       "Last Update": nowISO(),
     });
-
-    console.log(`Created Airtable row: ${recordId}`);
-
-    // Fetch and convert image URLs to Base64 
-    let subjectData = null;
-    if (subjectUrl) {
-        subjectData = await urlToDataURL(subjectUrl);
-    }
-    const refData = await Promise.all(refs.map(urlToDataURL));
+    submissionData.recordId = recordId; 
 
     const jobPromises = [];
     for (let i = 0; i < count; i++) {
       const p = (async (delay) => {
         await sleep(delay);
-        return submitWaveSpeedJob({
-          prompt,
-          subjectDataUrl: subjectData, 
-          referenceDataUrls: refData, 
-          width,
-          height,
-          runId,
-          recordId
-        });
+        let requestId;
+        
+        if (provider === 'WaveSpeed') {
+            requestId = await submitWaveSpeedJob({ ...submissionData, ...dataUrls });
+        } else { // Fal
+            requestId = await submitFalJob(submissionData);
+        }
+        return requestId;
+
       })(i * 1200);
       jobPromises.push(p);
     }
@@ -265,23 +333,24 @@ app.post("/api/start-batch", async (req, res) => {
       "Failed IDs": failedMessages.join(","),
       "Status": requestIds.length > 0 ? "processing" : "failed",
       "Last Update": nowISO(),
-      "Note": `🟢 Batch started. Submitted: ${requestIds.length}. Failed to submit: ${failedMessages.length}.`
+      "Note": `🟢 Batch started with ${provider}. Submitted: ${requestIds.length}. Failed to submit: ${failedMessages.length}.`
     });
 
-    res.json({ ok: true, parentRecordId: recordId, runId, message: "Batch started. Airtable will update when jobs finish." });
+    res.json({ ok: true, parentRecordId: recordId, runId, message: `Batch started on ${provider}. Airtable will update when jobs finish.` });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: e.message });
   }
 });
 
-// ---------- Webhook (FINAL FIX FOR OUTPUT PARSING) ----------
+
+// ---------- Webhook Handler: WaveSpeed ----------
 app.post("/webhooks/wavespeed", async (req, res) => {
-  console.log("📩 Incoming webhook:", JSON.stringify(req.body, null, 2));
+  console.log("📩 Incoming WaveSpeed webhook:", JSON.stringify(req.body, null, 2));
   
   const recordId = req.query.record_id;
   if (!recordId) {
-    console.warn("Webhook received without a record_id query param.");
+    console.warn("WaveSpeed Webhook received without a record_id query param.");
     return res.json({ ok: false, error: "Missing record_id" });
   }
 
@@ -289,18 +358,16 @@ app.post("/webhooks/wavespeed", async (req, res) => {
     const data = req.body || {};
     const requestId = data.id || data.requestId || "";
     
-    // Check if job failed
     if (data.status === 'failed' || data.error) {
-      console.error(`❌ Job ${requestId} failed:`, data.error || 'Unknown error');
+      console.error(`❌ WaveSpeed Job ${requestId} failed:`, data.error || 'Unknown error');
       const current = await getRow(recordId);
       const fields = current.fields || {};
       const prevFailed = (fields["Failed IDs"] || "").split(",").filter(Boolean);
       const updatedFailed = Array.from(new Set([...prevFailed, `${requestId} (runtime error)`])).join(",");
       await patchRow(recordId, { "Failed IDs": updatedFailed });
-      return res.json({ ok: true, message: "Logged failure." });
+      return res.json({ ok: true, message: "Logged WaveSpeed failure." });
     }
 
-    // FIX IS HERE: Correctly handle 'outputs' array of strings
     const outputsArray = Array.isArray(data.outputs) ? data.outputs : [];
     
     const imageUrls = outputsArray.filter(s => typeof s === 'string' && s.startsWith('http'))
@@ -310,16 +377,13 @@ app.post("/webhooks/wavespeed", async (req, res) => {
     const outputUrl = imageUrls[0] || null;
 
     if (!outputUrl) {
-      console.warn(`Webhook for ${requestId} had no output URL.`);
+      console.warn(`WaveSpeed webhook for ${requestId} had no output URL.`);
       return res.json({ ok: true, error: "No output URL found in data.outputs" }); 
     }
-
-    // END FIX 
 
     const current = await getRow(recordId);
     const fields = current.fields || {};
     
-    // Logic to track completed IDs (Seen IDs)
     const prevOutputs = Array.isArray(fields["Output"]) ? fields["Output"] : [];
     const prevSeen = (fields["Seen IDs"] || "").split(",").map(s => s.trim()).filter(Boolean);
     const allRequests = (fields["Request IDs"] || "").split(",").map(s => s.trim()).filter(Boolean);
@@ -327,35 +391,102 @@ app.post("/webhooks/wavespeed", async (req, res) => {
     const updatedOutputs = [...prevOutputs, { url: outputUrl }];
     const updatedSeen = Array.from(new Set([...prevSeen, requestId]));
 
-    // Check for completion logic
     const isComplete = allRequests.length > 0 && updatedSeen.length >= allRequests.length;
     
     const fieldsToUpdate = {
       "Output": updatedOutputs,
-      "Output URL": outputUrl, // Store the final image URL
-      "Seen IDs": updatedSeen.join(","), // Display the seen job ID
+      "Output URL": outputUrl, 
+      "Seen IDs": updatedSeen.join(","), 
       "Last Update": nowISO(),
-      "Note": `✅ Received image ${updatedSeen.length} of ${allRequests.length}`,
+      "Note": `✅ WaveSpeed: Received image ${updatedSeen.length} of ${allRequests.length}`,
     };
 
     if (isComplete) {
-      console.log(`Batch ${recordId} is now complete!`);
-      fieldsToUpdate["Status"] = "completed"; // Status change
+      fieldsToUpdate["Status"] = "completed"; 
       fieldsToUpdate["Completed At"] = nowISO();
-      fieldsToUpdate["Note"] = `✅ Batch complete. Received ${updatedSeen.length} images.`;
+      fieldsToUpdate["Note"] = `✅ WaveSpeed batch complete. Received ${updatedSeen.length} images.`;
     }
 
     await patchRow(recordId, fieldsToUpdate);
 
-    console.log(`✅ Airtable updated for record ${recordId}`);
+    console.log(`✅ Airtable updated for WaveSpeed record ${recordId}`);
     res.json({ ok: true });
   } catch (err) {
-    console.error(`❌ Webhook error for record ${recordId}:`, err.message);
+    console.error(`❌ WaveSpeed webhook error for record ${recordId}:`, err.message);
     res.json({ ok: false });
   }
 });
 
-app.get("/", (_req, res) => res.send("WaveSpeed Batch Server running. Visit /app"));
-// --- FIX: Listen on Render's dynamic port ---
+
+// ---------- Webhook Handler: Fal AI ----------
+app.post("/webhooks/fal", async (req, res) => {
+  console.log("📩 Incoming Fal webhook:", JSON.stringify(req.body, null, 2));
+  
+  const recordId = req.query.record_id;
+  if (!recordId) {
+    console.warn("Fal Webhook received without a record_id query param.");
+    return res.json({ ok: false, error: "Missing record_id" });
+  }
+
+  try {
+    const data = req.body || {};
+    const requestId = data.request_id || data.id || "";
+    
+    if (data.status === 'error' || data.error) {
+      console.error(`❌ Fal Job ${requestId} failed:`, data.error || 'Unknown error');
+      // Logic to update Airtable failure for Fal
+      const current = await getRow(recordId);
+      const fields = current.fields || {};
+      const prevFailed = (fields["Failed IDs"] || "").split(",").filter(Boolean);
+      const updatedFailed = Array.from(new Set([...prevFailed, `${requestId} (Fal error)`])).join(",");
+      await patchRow(recordId, { "Failed IDs": updatedFailed });
+      return res.json({ ok: true, message: "Logged Fal failure." });
+    }
+    
+    const outputUrl = data.images?.[0]?.url || data.output?.url || null; 
+
+    if (!outputUrl) {
+      console.warn(`Fal webhook for ${requestId} had no output URL.`);
+      return res.json({ ok: true, error: "No output URL found in Fal response" }); 
+    }
+
+    const current = await getRow(recordId);
+    const fields = current.fields || {};
+    
+    const prevOutputs = Array.isArray(fields["Output"]) ? fields["Output"] : [];
+    const prevSeen = (fields["Seen IDs"] || "").split(",").map(s => s.trim()).filter(Boolean);
+    const allRequests = (fields["Request IDs"] || "").split(",").map(s => s.trim()).filter(Boolean);
+
+    const updatedOutputs = [...prevOutputs, { url: outputUrl }];
+    const updatedSeen = Array.from(new Set([...prevSeen, requestId]));
+
+    const isComplete = allRequests.length > 0 && updatedSeen.length >= allRequests.length;
+    
+    const fieldsToUpdate = {
+      "Output": updatedOutputs,
+      "Output URL": outputUrl, 
+      "Seen IDs": updatedSeen.join(","), 
+      "Last Update": nowISO(),
+      "Note": `✅ Fal: Received image ${updatedSeen.length} of ${allRequests.length}`,
+    };
+
+    if (isComplete) {
+      fieldsToUpdate["Status"] = "completed"; 
+      fieldsToUpdate["Completed At"] = nowISO();
+      fieldsToUpdate["Note"] = `✅ Fal batch complete. Received ${updatedSeen.length} images.`;
+    }
+
+    await patchRow(recordId, fieldsToUpdate);
+
+    console.log(`✅ Airtable updated for Fal record ${recordId}`);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(`❌ Fal webhook error for record ${recordId}:`, err.message);
+    res.json({ ok: false });
+  }
+});
+
+
+app.get("/", (_req, res) => res.send("Multi-Provider Batch Server running. Visit /app"));
+// FIX: Listen on the dynamic port
 app.listen(PORT, () => console.log(`✅ Listening on port ${PORT}`));
-// ------------------------------------------
