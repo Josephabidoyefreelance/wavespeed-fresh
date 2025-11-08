@@ -2,10 +2,10 @@
   "name": "wavespeed-fresh",
   "version": "1.0.0",
   "type": "module",
-  "main": "server.js",
+  "main": "server.mjs",
   "scripts": {
-    "start": "node server.js",
-    "dev": "nodemon server.js"
+    "start": "node server.mjs",
+    "dev": "nodemon server.mjs"
   },
   "engines": {
     "node": ">=18"
@@ -17,6 +17,9 @@
     "dotenv": "^16.6.1",
     "express": "^4.21.2",
     "node-fetch": "^3.3.2"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.10"
   },
   "description": "",
   "repository": {

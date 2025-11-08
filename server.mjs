@@ -12,8 +12,10 @@ const {
   AIRTABLE_TABLE
 } = process.env;
 
+// Check for required environment variables (crucial for both local and Render)
 if (!PUBLIC_BASE_URL || !WAVESPEED_API_KEY || !AIRTABLE_PAT || !AIRTABLE_BASE_ID || !AIRTABLE_TABLE) {
-  console.error("❌ Missing required env vars.");
+  console.error("❌ Missing required env vars. Check your .env file or Render settings.");
+  process.error("Missing required environment variables.");
   process.exit(1);
 }
 
@@ -24,7 +26,7 @@ app.use(express.urlencoded({ extended: true, limit: "20mb" }));
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const nowISO = () => new Date().toISOString();
 
-// ---------- Airtable ----------
+// ---------- Airtable Functions ----------
 const baseURL = `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${encodeURIComponent(AIRTABLE_TABLE)}`;
 const headers = { Authorization: `Bearer ${AIRTABLE_PAT}`, "Content-Type": "application/json" };
 
@@ -47,65 +49,78 @@ async function getRow(recordId) {
   return res.json();
 }
 
-// ---------- WaveSpeed / Fal.ai ----------
+// Helper function to convert URL to Base64
+async function urlToDataURL(url) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`Failed to fetch image: ${url}`);
+  const buf = Buffer.from(await res.arrayBuffer());
+  const type = res.headers.get("content-type") || "image/png";
+  return `data:${type};base64,${buf.toString("base64")}`;
+}
 
-// ✅ FIX: This function is now "clean". It only submits the job and returns the ID
-// or throws an error. It no longer touches Airtable, which fixes the race condition.
+// ---------- WaveSpeed Job Submission (WORKING MODEL) ----------
 async function submitWaveSpeedJob({ prompt, subjectDataUrl, referenceDataUrls, width, height, runId, recordId }) {
-    const modelPath = "seedream-v4-edit-sequential"; // Use only the simplified model identifier
+    
+    // MODEL PATH: Standard Seedream V4 (T2I) - This model is licensed for your key.
+    const modelPath = "bytedance/seedream-v4"; 
+    
+    // PAYLOAD ID: The corresponding ID
+    const simplifiedModelName = "bytedance/seedream-v4"; 
+
+    // Combine subject and references into a single array for the API
+    const allImages = (subjectDataUrl ? [subjectDataUrl] : []).concat(referenceDataUrls || []);
+
     const payload = {
         prompt,
-        // The API only needs the model identifier, not the full path
-        model: modelPath, 
+        model: simplifiedModelName, 
         width: Number(width) || 1024,
         height: Number(height) || 1024,
-        images: [subjectDataUrl, ...referenceDataUrls],
+        images: allImages, // Images are included now
     };
 
     const webhook = `${PUBLIC_BASE_URL.replace(/\/+$/, "")}/webhooks/wavespeed?record_id=${encodeURIComponent(recordId)}&run_id=${encodeURIComponent(runId)}`;
     
-    // 🛑 THE CRITICAL FIX IS HERE: The URL must match the format the WaveSpeed API expects.
-    // It's most likely api/v3/MODEL_NAME
     const url = `https://api.wavespeed.ai/api/v3/${modelPath}`; 
 
     const res = await fetch(`${url}?webhook=${encodeURIComponent(webhook)}`, {
         method: "POST",
         headers: {
-            Authorization: `Bearer ${WAVESPEED_API_KEY}`,
+            Authorization: `Bearer ${WAVESPEED_API_KEY}`, 
             "Content-Type": "application/json",
         },
         body: JSON.stringify(payload),
     });
-    // ... rest of the function remains the same
 
-  const txt = await res.text();
-  try {
-    const data = JSON.parse(txt);
-
+    const txt = await res.text();
+    
     if (!res.ok) {
-      console.error(`❌ WaveSpeed submit error: ${txt}`);
-      // Include the actual status code for better debugging if needed
-      throw new Error(`WaveSpeed API Error: ${res.status} - ${data.message || txt}`);
+        console.error(`❌ WaveSpeed submit error (Status ${res.status}): ${txt}`);
+        let errorMessage = `WaveSpeed API Error (${res.status}): `;
+        try {
+            const data = JSON.parse(txt);
+            errorMessage += data.message || txt;
+        } catch {
+            errorMessage += txt;
+        }
+        throw new Error(errorMessage);
     }
     
-    const requestId = data.id || data.request_id || data.task_id || null;
+    // ID PARSING FIX: Access the inner 'data' object
+    const responseData = JSON.parse(txt);
+    const jobData = responseData.data || {}; 
+    
+    const requestId = jobData.id || jobData.request_id || jobData.task_id || null; 
+    
     if (!requestId) {
-      console.error("❌ WaveSpeed submit: no id in response, body was:", txt);
-      throw new Error("WaveSpeed submit: no id in response");
+        console.error("❌ WaveSpeed submit: no id in response, body was:", txt);
+        throw new Error("WaveSpeed submit: no id in response");
     }
 
     console.log(`🚀 WaveSpeed job submitted: ${requestId}`);
-    return requestId; // Return only the ID
-  } catch (err) {
-    // If JSON parsing fails (e.g., non-JSON error response)
-    console.error(`❌ WaveSpeed submit error (Pre-ID check): ${err.message}. Response: ${txt}`);
-    throw new Error(`WaveSpeed API Error: Could not parse response. ${txt.slice(0, 100)}`);
-  }
+    return requestId;
 }
 
-
-// ---------- UI (NO CHANGES MADE) ----------
-// The UI part remains the same.
+// ---------- UI (IMAGE INPUTS RESTORED) ----------
 app.get("/app", (_req, res) => {
   res.type("html").send(`<!doctype html>
 <html>
@@ -150,13 +165,13 @@ button:hover{background:#0097a7;box-shadow:0 0 12px rgba(0,188,212,.5);}
 </style>
 </head>
 <body>
-<h1>⚡ WaveSpeed Seedream v4 — Batch Runner</h1>
+<h1>⚡ WaveSpeed Seedream v4 — Image-Conditioned Runner</h1>
 <form id="batchForm">
   <label>Prompt</label>
   <textarea name="prompt" rows="3" required placeholder="Describe your dream image..."></textarea>
-  <label>Subject image URL</label>
-  <input name="subjectUrl" type="url" required placeholder="https://example.com/subject.png">
-  <label>Reference image URLs (comma-separated)</label>
+  <label>Subject image URL (Optional)</label>
+  <input name="subjectUrl" type="url" placeholder="https://example.com/subject.png">
+  <label>Reference image URLs (comma-separated, Optional)</label>
   <input name="referenceUrls" type="text" placeholder="https://ref1.png, https://ref2.png">
   <div style="display:flex;gap:10px;margin-top:10px;">
     <div style="flex:1"><label>Width</label><input name="width" type="number" value="1024"></div>
@@ -181,21 +196,21 @@ form.addEventListener('submit',async e=>{
 </body></html>`);
 });
 
-// ---------- API ----------
+// ---------- API (IMAGE DATA HANDLING RESTORED) ----------
 app.post("/api/start-batch", async (req, res) => {
   try {
-    const { prompt, subjectUrl, referenceUrls = "", width = 1024, height = 1024, count = 1 } = req.body;
-    if (!prompt || !subjectUrl) return res.status(400).json({ error: "Missing prompt or subject URL" });
+    const { prompt, subjectUrl = "", referenceUrls = "", width = 1024, height = 1024, count = 1 } = req.body;
+    if (!prompt) return res.status(400).json({ error: "Missing prompt" });
 
     const refs = referenceUrls.split(",").map(s => s.trim()).filter(Boolean);
     const runId = crypto.randomUUID();
 
-    // ✅ FIX: Create the row with a "pending" status first
+    // Create the row with a "pending" status first
     const recordId = await createRow({
       "Prompt": prompt,
-      "Subject": [{ url: subjectUrl }],
+      "Subject": subjectUrl ? [{ url: subjectUrl }] : [],
       "References": refs.map(u => ({ url: u })),
-      "Model": "Seedream v4", // Display name for Airtable
+      "Model": "Seedream v4 (T2I + Image Condition)", // Display name for Airtable
       "Size": `${width}x${height}`,
       "Status": "pending", // Start as pending
       "Run ID": runId,
@@ -205,36 +220,30 @@ app.post("/api/start-batch", async (req, res) => {
 
     console.log(`Created Airtable row: ${recordId}`);
 
-    async function urlToDataURL(url) {
-      const res = await fetch(url);
-      if (!res.ok) throw new Error(`Failed to fetch image: ${url}`);
-      const buf = Buffer.from(await res.arrayBuffer());
-      const type = res.headers.get("content-type") || "image/png";
-      return `data:${type};base64,${buf.toString("base64")}`;
+    // Fetch and convert image URLs to Base64 
+    let subjectData = null;
+    if (subjectUrl) {
+        subjectData = await urlToDataURL(subjectUrl);
     }
-
-    const subjectData = await urlToDataURL(subjectUrl);
     const refData = await Promise.all(refs.map(urlToDataURL));
 
     const jobPromises = [];
     for (let i = 0; i < count; i++) {
-      // Space out the start of each job
       const p = (async (delay) => {
         await sleep(delay);
         return submitWaveSpeedJob({
           prompt,
-          subjectDataUrl: subjectData,
-          referenceDataUrls: refData,
+          subjectDataUrl: subjectData, 
+          referenceDataUrls: refData, 
           width,
           height,
           runId,
           recordId
         });
-      })(i * 1200); // 1.2 second spacing
+      })(i * 1200);
       jobPromises.push(p);
     }
 
-    // ✅ FIX: Wait for all jobs to be SUBMITTED, then update Airtable ONCE.
     const results = await Promise.allSettled(jobPromises);
 
     const requestIds = [];
@@ -242,17 +251,16 @@ app.post("/api/start-batch", async (req, res) => {
 
     results.forEach(r => {
       if (r.status === 'fulfilled') {
-        requestIds.push(r.value); // r.value is the requestId
+        requestIds.push(r.value);
       } else {
-        failedMessages.push(r.reason.message); // r.reason is the error
+        failedMessages.push(r.reason.message);
       }
     });
 
-    // Now, update Airtable with all IDs and failures from the submission step
     await patchRow(recordId, {
       "Request IDs": requestIds.join(","),
       "Failed IDs": failedMessages.join(","),
-      "Status": requestIds.length > 0 ? "processing" : "failed", // Set to processing only if at least one job started
+      "Status": requestIds.length > 0 ? "processing" : "failed",
       "Last Update": nowISO(),
       "Note": `🟢 Batch started. Submitted: ${requestIds.length}. Failed to submit: ${failedMessages.length}.`
     });
@@ -264,7 +272,7 @@ app.post("/api/start-batch", async (req, res) => {
   }
 });
 
-// ---------- Webhook ----------
+// ---------- Webhook (FINAL FIX FOR OUTPUT PARSING) ----------
 app.post("/webhooks/wavespeed", async (req, res) => {
   console.log("📩 Incoming webhook:", JSON.stringify(req.body, null, 2));
   
@@ -289,19 +297,30 @@ app.post("/webhooks/wavespeed", async (req, res) => {
       return res.json({ ok: true, message: "Logged failure." });
     }
 
-    // Process successful job
-    const outputs = Array.isArray(data.output) ? data.output : (data.output?.url ? [data.output] : []);
-    const imageUrls = outputs.map(o => o.url || o).filter(Boolean);
-    const outputUrl = imageUrls[0] || data.image || null;
+    // FIX IS HERE: Correctly handle 'outputs' array of strings
+    
+    // 1. Prioritize data.outputs (the array of URL strings)
+    const outputsArray = Array.isArray(data.outputs) ? data.outputs : [];
+    
+    // 2. Extract URL strings directly, or fall back to single image fields
+    const imageUrls = outputsArray.filter(s => typeof s === 'string' && s.startsWith('http'))
+                      .concat(data.output?.url || data.image || [])
+                      .filter(Boolean);
+                      
+    const outputUrl = imageUrls[0] || null;
 
     if (!outputUrl) {
+      // The status is 'completed' but we couldn't find a URL. Log and return OK.
       console.warn(`Webhook for ${requestId} had no output URL.`);
-      return res.json({ ok: false, error: "No output URL" });
+      return res.json({ ok: true, error: "No output URL found in data.outputs" }); 
     }
+
+    // END FIX 
 
     const current = await getRow(recordId);
     const fields = current.fields || {};
     
+    // Logic to track completed IDs (Seen IDs)
     const prevOutputs = Array.isArray(fields["Output"]) ? fields["Output"] : [];
     const prevSeen = (fields["Seen IDs"] || "").split(",").map(s => s.trim()).filter(Boolean);
     const allRequests = (fields["Request IDs"] || "").split(",").map(s => s.trim()).filter(Boolean);
@@ -309,20 +328,20 @@ app.post("/webhooks/wavespeed", async (req, res) => {
     const updatedOutputs = [...prevOutputs, { url: outputUrl }];
     const updatedSeen = Array.from(new Set([...prevSeen, requestId]));
 
-    // ✅ FIX: Check for completion logic
+    // Check for completion logic
     const isComplete = allRequests.length > 0 && updatedSeen.length >= allRequests.length;
     
     const fieldsToUpdate = {
       "Output": updatedOutputs,
-      "Output URL": outputUrl, // Store the latest URL
-      "Seen IDs": updatedSeen.join(","),
+      "Output URL": outputUrl, // Store the final image URL
+      "Seen IDs": updatedSeen.join(","), // Display the seen job ID
       "Last Update": nowISO(),
       "Note": `✅ Received image ${updatedSeen.length} of ${allRequests.length}`,
     };
 
     if (isComplete) {
       console.log(`Batch ${recordId} is now complete!`);
-      fieldsToUpdate["Status"] = "completed";
+      fieldsToUpdate["Status"] = "completed"; // Status change
       fieldsToUpdate["Completed At"] = nowISO();
       fieldsToUpdate["Note"] = `✅ Batch complete. Received ${updatedSeen.length} images.`;
     }
